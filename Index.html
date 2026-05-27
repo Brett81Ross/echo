@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acoustic Sonar Pulse Visualizer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background-color: #0d0f12;
+            color: #e2e8f0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            color: #00ffcc;
+            font-size: 1.5rem;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        p {
+            color: #94a3b8;
+            font-size: 0.9rem;
+            text-align: center;
+            max-width: 500px;
+            margin-bottom: 20px;
+        }
+        #controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            background-color: #1e293b;
+            color: #00ffcc;
+            border: 2px solid #00ffcc;
+            padding: 12px 24px;
+            font-size: 1rem;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        button:hover {
+            background-color: #00ffcc;
+            color: #0d0f12;
+            box-shadow: 0 0 15px rgba(0, 255, 204, 0.4);
+        }
+        button:disabled {
+            border-color: #475569;
+            color: #475569;
+            cursor: not-allowed;
+            background-color: transparent;
+            box-shadow: none;
+        }
+        #visualizer {
+            background-color: #11141a;
+            border: 1px solid #1e293b;
+            border-radius: 8px;
+            box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.6);
+            width: 100%;
+            max-width: 600px;
+            height: 300px;
+        }
+        #metrics {
+            margin-top: 15px;
+            font-family: monospace;
+            font-size: 1rem;
+            color: #38bdf8;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Acoustic Sonar</h1>
+    <p>Fires a brief 19kHz pulse and visualizes the microsecond amplitude response of the returning echo. Position your phone facing a flat wall.</p>
+
+    <div id="controls">
+        <button id="initBtn">Start Audio System</button>
+        <button id="pingBtn" disabled>Ping Sonar</button>
+    </div>
+
+    <canvas id="visualizer" width="1200" height="600"></canvas>
+    <div id="metrics">Status: Ready to initialize...</div>
+
+    <script>
+        const initBtn = document.getElementById('initBtn');
+        const pingBtn = document.getElementById('pingBtn');
+        const metrics = document.getElementById('metrics');
+        const canvas = document.getElementById('visualizer');
+        const ctx = canvas.getContext('2d');
+
+        let audioCtx = null;
+        let micStream = null;
+        let micSource = null;
+        let analyser = null;
+        let biquadFilter = null;
+        
+        const bufferLength = 2048;
+        const dataArray = new Float32Array(bufferLength);
+
+        // Initialize user audio and unlock browser context
+        initBtn.addEventListener('click', async () => {
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // Request microphone access with echo cancellation explicitly disabled for raw processing
+                micStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    }
+                });
+
+                micSource = audioCtx.createMediaStreamSource(micStream);
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = bufferLength;
+
+                // High-pass filter to isolate the 19kHz pulse and filter out ambient human/room noise
+                biquadFilter = audioCtx.createBiquadFilter();
+                biquadFilter.type = "highpass";
+                biquadFilter.frequency.setValueAtTime(18000, audioCtx.currentTime);
+
+                // Chain: Mic -> High-pass Filter -> Analyser
+                micSource.connect(biquadFilter);
+                biquadFilter.connect(analyser);
+
+                metrics.innerText = "Status: Audio linked. Ready to ping.";
+                initBtn.disabled = true;
+                pingBtn.disabled = false;
+                
+                clearCanvas();
+            } catch (err) {
+                metrics.innerText = "Error accessing microphone: " + err.message;
+                console.error(err);
+            }
+        });
+
+        // Trigger the acoustic pulse
+        pingBtn.addEventListener('click', () => {
+            if (!audioCtx) return;
+            
+            metrics.innerText = "Status: Transmitting pulse...";
+            pingBtn.disabled = true;
+
+            // Create oscillator for a sharp 19kHz tone burst
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(19000, audioCtx.currentTime); // 19kHz near-ultrasonic chirp
+
+            // Envelope to avoid speaker popping (10ms pulse duration)
+            gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+            gainNode.gain.linearRampToValueAtTime(1, audioCtx.currentTime + 0.002);
+            gainNode.gain.setValueAtTime(1, audioCtx.currentTime + 0.010);
+            gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.012);
+
+            osc.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.015);
+
+            // Wait a tiny fraction of a second for the hardware latency, then record the echo window
+            setTimeout(() => {
+                captureEcho();
+            }, 5);
+        });
+
+        function captureEcho() {
+            // Grab raw time-domain sound data
+            analyser.getFloat32TimeDomainData(dataArray);
+            
+            // Draw the amplitude layout to the canvas
+            drawTimeline(dataArray);
+            
+            metrics.innerText = "Status: Pulse captured. Scan canvas for echo peaks.";
+            pingBtn.disabled = false;
+        }
+
+        function clearCanvas() {
+            ctx.fillStyle = '#11141a';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw center baseline
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, canvas.height / 2);
+            ctx.lineTo(canvas.width, canvas.height / 2);
+            ctx.stroke();
+        }
+
+        function drawTimeline(data) {
+            clearCanvas();
+
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#00ffcc';
+            ctx.beginPath();
+
+            const sliceWidth = canvas.width / bufferLength;
+            let x = 0;
+
+            for (let i = 0; i < bufferLength; i++) {
+                // Amplify raw floating values to show clear spikes on screen
+                const v = data[i] * 8; 
+                const y = (v * canvas.height / 2) + (canvas.height / 2);
+
+                if (i === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+
+                x += sliceWidth;
+            }
+
+            ctx.lineTo(canvas.width, canvas.height / 2);
+            ctx.stroke();
+
+            // Overlay horizontal millisecond markers for visual analysis
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '18px monospace';
+            ctx.fillText("0ms (Transmission)", 10, 40);
+            ctx.fillText("12ms", canvas.width * 0.25, 40);
+            ctx.fillText("24ms", canvas.width * 0.5, 40);
+            ctx.fillText("36ms", canvas.width * 0.75, 40);
+            ctx.fillText("46ms", canvas.width - 60, 40);
+        }
+    </script>
+</body>
+</html>
